@@ -3,7 +3,7 @@ import pandas as pd
 from training.pipeline import ShockDetectionPipeline
 
 # ── Load your parquet ──────────────────────────────────────────
-df = pd.read_parquet("/home/gaian/Downloads/2000.parquet")
+df = pd.read_parquet("/mnt/data/TEST_CSV/2000.parquet")
 
 # ── Fit ───────────────────────────────────────────────────────
 pipe = ShockDetectionPipeline(
