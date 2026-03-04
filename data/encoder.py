@@ -85,7 +85,7 @@ class AutoColumnEncoder:
             pass
         # Try generic datetime parsing
         try:
-            parsed = pd.to_datetime(sample, infer_datetime_format=True, errors="coerce")
+            parsed = pd.to_datetime(sample, errors="coerce")
             if parsed.notna().mean() > 0.8:
                 return True
         except Exception:
@@ -101,7 +101,7 @@ class AutoColumnEncoder:
         except Exception:
             pass
         try:
-            return pd.to_datetime(series, infer_datetime_format=True, errors="coerce")
+            return pd.to_datetime(series, errors="coerce")
         except Exception:
             return pd.Series([pd.NaT] * len(series), index=series.index)
 

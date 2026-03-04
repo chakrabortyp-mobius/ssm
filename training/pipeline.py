@@ -270,3 +270,45 @@ class ShockDetectionPipeline:
     def _require_fitted(self):
         if not self.fitted:
             raise RuntimeError("Call fit() before transform() or analysis methods.")
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Save / Load
+    # ────────────────────────────────────────────────────────────────────────
+
+    def save(self, path: str = "model.pkl") -> None:
+        """
+        Save the fitted pipeline to disk using pickle.
+
+        Saves everything needed for inference:
+            encoder decisions, SSM weights, regime centroids, scorer config.
+
+        Parameters
+        ----------
+        path : file path, e.g. "model.pkl" or "/mnt/data/ssm/model.pkl"
+        """
+        import pickle, os
+        self._require_fitted()
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
+        size_mb = os.path.getsize(path) / 1024 / 1024
+        log.info(f"Model saved → {path}  ({size_mb:.2f} MB)")
+
+    @classmethod
+    def load(cls, path: str) -> "ShockDetectionPipeline":
+        """
+        Load a previously saved pipeline from disk.
+
+        Parameters
+        ----------
+        path : path to the .pkl file written by save()
+
+        Returns
+        -------
+        Fitted ShockDetectionPipeline ready for .transform()
+        """
+        import pickle
+        with open(path, "rb") as f:
+            obj = pickle.load(f)
+        log.info(f"Model loaded ← {path}")
+        return obj
