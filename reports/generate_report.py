@@ -103,7 +103,7 @@ def plot_cluster(results: pd.DataFrame, out_path: str, title: str, best_k: int,
 
     # Step 2: t-SNE to 2D
     perp = min(tsne_perplexity, len(Z_pca) // 4)
-    tsne = TSNE(n_components=2, perplexity=perp, n_iter=500,
+    tsne = TSNE(n_components=2, perplexity=perp, max_iter=500,
                 random_state=random_state, init='pca', learning_rate='auto')
     Z_2d = tsne.fit_transform(Z_pca)
 
