@@ -1,149 +1,125 @@
 """
 model/regime.py
 ===============
-RegimeDiscovery — unsupervised k-means clustering on latent states z_t.
+RegimeDiscovery — unsupervised k-means on latent states z_t.
 
-Why k-means on z_t (not x_t)?
-  x_t is noisy, high-dimensional, and column-heterogeneous.
-  z_t is a low-dimensional, temporally coherent summary learned by the SSM.
-  Regimes in z-space reflect how the system EVOLVES, not just what it looks
-  like at a single moment — which is what matters for geopolitical analysis.
-
-The model is fully unsupervised:
-  - You supply K (number of regimes) as a hyperparameter
-  - Centroid initialisation is deterministic (seeded)
-  - Post-hoc labelling is done by the analyst, not the model
-    (e.g. "Regime 2 has high delta and high recon_error → call it Shock")
+K is chosen automatically via silhouette score (K=2..10).
+Regime labels (0,1,2...) are raw integers. The analyst interprets
+them by inspecting avg_shock and avg_delta per regime.
 """
 
 import numpy as np
 from scipy.special import softmax
-from typing import Optional
-
+from typing import Optional, Dict
 from utils.logger import get_logger
 
 log = get_logger("RegimeDiscovery")
 
 
-class RegimeDiscovery:
+def best_k_by_silhouette(
+    Z:           np.ndarray,
+    k_max:       int = 10,
+    sample_size: int = 10_000,
+    seed:        int = 42,
+) -> Dict:
     """
-    Unsupervised k-means on latent state trajectories.
+    Test K = 2..k_max and return the K with the highest silhouette score.
+
+    Silhouette score: how well each point fits its own cluster vs
+    the nearest other cluster. Range [-1, +1]. Higher = better.
 
     Parameters
     ----------
-    n_regimes   : number of clusters K
-    max_iter    : k-means iteration limit (default 200)
-    temperature : softmax sharpness for predict_proba (higher = sharper)
-    seed        : random seed for centroid initialisation
-    """
+    Z           : (T, d_state) latent state matrix from SSM
+    k_max       : max K to test (tests 2, 3, ..., k_max)
+    sample_size : rows to subsample (silhouette is O(n^2) — keep ≤10k)
+    seed        : random seed
 
-    def __init__(
-        self,
-        n_regimes:   int   = 3,
-        max_iter:    int   = 200,
-        temperature: float = 3.0,
-        seed:        int   = 42,
-    ):
+    Returns
+    -------
+    dict:
+        best_k      : int   — K with highest silhouette score
+        scores      : dict  — {k: score} for all tested K
+        best_score  : float — silhouette score at best_k
+    """
+    from sklearn.metrics import silhouette_score
+
+    rng = np.random.default_rng(seed)
+    if len(Z) > sample_size:
+        idx      = rng.choice(len(Z), sample_size, replace=False)
+        Z_sample = Z[idx]
+    else:
+        Z_sample = Z
+
+    scores = {}
+    log.info(f"Silhouette K selection: K=2..{k_max} on {len(Z_sample):,} samples")
+
+    for k in range(2, k_max + 1):
+        rd     = RegimeDiscovery(n_regimes=k, seed=seed)
+        rd.fit(Z_sample)
+        labels = rd.predict(Z_sample)
+
+        if len(np.unique(labels)) < 2:
+            scores[k] = -1.0
+            log.warning(f"  K={k} produced only 1 cluster — score=-1")
+            continue
+
+        score     = float(silhouette_score(Z_sample, labels, random_state=seed))
+        scores[k] = round(score, 6)
+        log.info(f"  K={k:2d} | silhouette = {score:.6f}")
+
+    best_k     = max(scores, key=scores.get)
+    best_score = scores[best_k]
+    log.info(f"Best K = {best_k}  (silhouette = {best_score:.6f})")
+
+    return {"best_k": best_k, "scores": scores, "best_score": best_score}
+
+
+class RegimeDiscovery:
+    def __init__(self, n_regimes=3, max_iter=200, temperature=3.0, seed=42):
         self.n_regimes   = n_regimes
         self.max_iter    = max_iter
         self.temperature = temperature
         self.seed        = seed
-        self.centroids: Optional[np.ndarray] = None   # (K, d_state)
+        self.centroids: Optional[np.ndarray] = None
         self.fitted = False
 
-    # ────────────────────────────────────────────────────────────────────────
-    # Fit
-    # ────────────────────────────────────────────────────────────────────────
-
     def fit(self, Z: np.ndarray) -> "RegimeDiscovery":
-        """
-        Run k-means on latent states Z.
-
-        Parameters
-        ----------
-        Z : (T, d_state)  latent state matrix from SelectiveSSM.predict()
-        """
         rng = np.random.default_rng(self.seed)
         idx = rng.choice(len(Z), self.n_regimes, replace=False)
         self.centroids = Z[idx].copy()
 
-        for iteration in range(self.max_iter):
-            # Assignment step
-            dists  = np.linalg.norm(
-                Z[:, None, :] - self.centroids[None, :, :], axis=2
-            )  # (T, K)
+        for it in range(self.max_iter):
+            dists  = np.linalg.norm(Z[:,None,:] - self.centroids[None,:,:], axis=2)
             labels = np.argmin(dists, axis=1)
-
-            # Update step
-            new_centroids = np.array([
-                Z[labels == k].mean(axis=0)
-                if (labels == k).any()
-                else self.centroids[k]
+            new_c  = np.array([
+                Z[labels==k].mean(axis=0) if (labels==k).any() else self.centroids[k]
                 for k in range(self.n_regimes)
             ])
-
-            shift = np.linalg.norm(new_centroids - self.centroids)
-            self.centroids = new_centroids
-
-            if shift < 1e-7:
-                log.debug(f"K-means converged at iteration {iteration + 1}")
+            if np.linalg.norm(new_c - self.centroids) < 1e-7:
                 break
+            self.centroids = new_c
 
-        # Log regime sizes
-        sizes = [int((labels == k).sum()) for k in range(self.n_regimes)]
-        log.info(f"Regime sizes: { {k: s for k, s in enumerate(sizes)} }")
+        sizes = {k: int((labels==k).sum()) for k in range(self.n_regimes)}
+        log.info(f"Regime sizes: {sizes}")
         self.fitted = True
         return self
 
-    # ────────────────────────────────────────────────────────────────────────
-    # Prediction
-    # ────────────────────────────────────────────────────────────────────────
-
     def predict(self, Z: np.ndarray) -> np.ndarray:
-        """
-        Hard regime assignment.
-
-        Returns
-        -------
-        labels : (T,)  integer regime index for each timestep
-        """
-        self._require_fitted()
-        dists = np.linalg.norm(
-            Z[:, None, :] - self.centroids[None, :, :], axis=2
-        )
+        self._check(); dists = np.linalg.norm(Z[:,None,:] - self.centroids[None,:,:], axis=2)
         return np.argmin(dists, axis=1)
 
     def predict_proba(self, Z: np.ndarray) -> np.ndarray:
-        """
-        Soft regime assignment via distance-based softmax.
-
-        Returns
-        -------
-        probs : (T, K)  probability of each regime at each timestep
-        """
-        self._require_fitted()
-        dists = np.linalg.norm(
-            Z[:, None, :] - self.centroids[None, :, :], axis=2
-        )
+        self._check(); dists = np.linalg.norm(Z[:,None,:] - self.centroids[None,:,:], axis=2)
         return softmax(-dists * self.temperature, axis=1)
 
-    # ────────────────────────────────────────────────────────────────────────
-    # Inspection
-    # ────────────────────────────────────────────────────────────────────────
-
     def centroid_distances(self) -> np.ndarray:
-        """
-        Return K×K matrix of pairwise centroid distances.
-        Well-separated regimes → large off-diagonal values.
-        """
-        self._require_fitted()
-        K = self.n_regimes
-        D = np.zeros((K, K))
+        self._check()
+        K = self.n_regimes; D = np.zeros((K,K))
         for i in range(K):
             for j in range(K):
-                D[i, j] = np.linalg.norm(self.centroids[i] - self.centroids[j])
+                D[i,j] = np.linalg.norm(self.centroids[i] - self.centroids[j])
         return D
 
-    def _require_fitted(self):
-        if not self.fitted or self.centroids is None:
-            raise RuntimeError("Call fit() before predict().")
+    def _check(self):
+        if not self.fitted: raise RuntimeError("Call fit() first.")
