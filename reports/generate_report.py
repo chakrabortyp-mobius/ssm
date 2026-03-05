@@ -10,7 +10,7 @@ Output layout (created under the project root):
     │   ├── top_shocks.csv              top 20 by shock_score
     │   ├── regime_summary.csv          per-regime statistics
     │   ├── silhouette_scores.csv       K=2..10 scores + best K  (train only)
-    │   ├── cluster_plot.png            z_0 vs z_1 coloured by regime
+    │   ├── cluster_plot.png            PCA→t-SNE 2D projection coloured by regime
     │   ├── shock_score_timeline.png    shock_score vs date (MM-YY x-axis)
     │   └── silhouette_plot.png         bar chart of silhouette scores (train only)
     └── val/
@@ -52,41 +52,97 @@ def _parse_dates(series: pd.Series) -> pd.Series:
         return pd.to_datetime(series, errors='coerce')
 
 
-# ── Plot 1: Cluster scatter ───────────────────────────────────────────────────
+# ── Plot 1: Cluster scatter (PCA → t-SNE projection) ─────────────────────────
 
-def plot_cluster(results: pd.DataFrame, out_path: str, title: str, best_k: int):
+def plot_cluster(results: pd.DataFrame, out_path: str, title: str, best_k: int,
+                 tsne_sample: int = 5_000, tsne_perplexity: int = 40,
+                 random_state: int = 42):
+    """
+    Project all 16 z-dimensions to 2D using PCA → t-SNE, then scatter
+    coloured by regime label. High-shock points overlaid as red stars.
+
+    Why PCA first?
+        t-SNE is O(n²) and sensitive to noise in high-dim space.
+        PCA removes noisy dimensions first and speeds up t-SNE.
+
+    Why t-SNE not just z_0 vs z_1?
+        z_0 and z_1 are arbitrary dimensions — there is no guarantee
+        they capture the most variance or best separate the clusters.
+        t-SNE finds a 2D layout that preserves the 16-dim neighbourhood
+        structure, so clusters that are genuinely separate in 16D will
+        appear separate in the plot.
+    """
+    from sklearn.decomposition import PCA
+    from sklearn.manifold import TSNE
+
     z_cols = [c for c in results.columns if c.startswith('z_')]
     if len(z_cols) < 2:
         print(f"  ⚠  cluster_plot skipped — need at least 2 z_ columns")
         return
 
-    fig, ax = plt.subplots(figsize=(10, 7))
+    Z = results[z_cols].values
+
+    # Subsample for t-SNE speed (t-SNE is O(n²))
+    rng = np.random.default_rng(random_state)
+    n   = len(Z)
+    if n > tsne_sample:
+        idx    = rng.choice(n, tsne_sample, replace=False)
+        Z_sub  = Z[idx]
+        sub_df = results.iloc[idx].reset_index(drop=True)
+        note   = f"(t-SNE on {tsne_sample:,} / {n:,} sampled points)"
+    else:
+        Z_sub  = Z
+        sub_df = results.reset_index(drop=True)
+        note   = f"({n:,} points)"
+
+    # Step 1: PCA to denoise before t-SNE
+    n_pca = min(10, Z_sub.shape[1], Z_sub.shape[0] - 1)
+    pca   = PCA(n_components=n_pca, random_state=random_state)
+    Z_pca = pca.fit_transform(Z_sub)
+    var_explained = pca.explained_variance_ratio_.sum() * 100
+
+    # Step 2: t-SNE to 2D
+    perp = min(tsne_perplexity, len(Z_pca) // 4)
+    tsne = TSNE(n_components=2, perplexity=perp, n_iter=500,
+                random_state=random_state, init='pca', learning_rate='auto')
+    Z_2d = tsne.fit_transform(Z_pca)
+
+    print(f"  [t-SNE] PCA explained {var_explained:.1f}% variance | "
+          f"t-SNE KL divergence: {tsne.kl_divergence_:.4f}")
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(11, 8))
     fig.patch.set_facecolor(WHITE)
     ax.set_facecolor('#FAFAFA')
 
-    for r in sorted(results['regime'].unique()):
-        sub = results[results['regime'] == r]
-        ax.scatter(sub[z_cols[0]], sub[z_cols[1]],
-                   c=_rcolor(r), alpha=0.35, s=14, linewidths=0,
-                   label=f'Regime {r}  (n={len(sub):,})')
-        cx, cy = sub[z_cols[0]].mean(), sub[z_cols[1]].mean()
-        ax.scatter(cx, cy, c=_rcolor(r), s=240, marker='X',
-                   edgecolors='white', linewidths=2, zorder=5)
-        ax.annotate(f' R{r}', (cx, cy), fontsize=11,
+    for r in sorted(sub_df['regime'].unique()):
+        mask = sub_df['regime'] == r
+        ax.scatter(Z_2d[mask, 0], Z_2d[mask, 1],
+                   c=_rcolor(r), alpha=0.40, s=14, linewidths=0,
+                   label=f'Regime {r}  (n={mask.sum():,})')
+        cx = Z_2d[mask, 0].mean()
+        cy = Z_2d[mask, 1].mean()
+        ax.scatter(cx, cy, c=_rcolor(r), s=280, marker='X',
+                   edgecolors='white', linewidths=2.0, zorder=5)
+        ax.annotate(f'  R{r}', (cx, cy), fontsize=12,
                     fontweight='bold', color=_rcolor(r), zorder=6)
 
-    high = results[results['shock_score'] > 0.8]
-    if len(high):
-        ax.scatter(high[z_cols[0]], high[z_cols[1]],
-                   c=RED, s=60, marker='*', zorder=4,
-                   label=f'shock_score > 0.8  (n={len(high):,})',
+    high_mask = sub_df['shock_score'] > 0.8
+    if high_mask.any():
+        ax.scatter(Z_2d[high_mask, 0], Z_2d[high_mask, 1],
+                   c=RED, s=70, marker='*', zorder=4,
+                   label=f'shock_score > 0.8  (n={high_mask.sum():,})',
                    edgecolors='white', linewidths=0.5)
 
-    ax.set_xlabel('z_0', color=NAVY, fontsize=11)
-    ax.set_ylabel('z_1', color=NAVY, fontsize=11)
-    ax.set_title(title, fontsize=13, fontweight='bold', color=NAVY, pad=12)
-    ax.legend(fontsize=9, framealpha=0.9)
-    ax.spines[['top','right']].set_visible(False)
+    ax.set_xlabel('t-SNE dimension 1', color=NAVY, fontsize=11)
+    ax.set_ylabel('t-SNE dimension 2', color=NAVY, fontsize=11)
+    ax.set_title(
+        f'{title}\n'
+        f'PCA({n_pca}d, {var_explained:.0f}% var) → t-SNE(2d)  {note}',
+        fontsize=12, fontweight='bold', color=NAVY, pad=12
+    )
+    ax.legend(fontsize=9, framealpha=0.9, loc='best')
+    ax.spines[['top', 'right']].set_visible(False)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches='tight', facecolor=WHITE)
     plt.close()
