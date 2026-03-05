@@ -91,7 +91,7 @@ class ShockDetectionPipeline:
         # Step 2: Build + train SSM
         self.ssm = SelectiveSSM(d_input=X.shape[1], d_state=self.latent_dim, lr=self.lr)
         if self.windowed and len(X) > self.window_size:
-            self.trainer = WindowedTrainer(self.ssm, self.window_size, self.n_iter)
+            self.trainer = WindowedTrainer(self.ssm, window_size=self.window_size, n_iter=self.n_iter)
         else:
             self.trainer = Trainer(self.ssm, self.n_iter, self.patience)
         self.trainer.fit(X)
