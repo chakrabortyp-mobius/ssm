@@ -60,7 +60,7 @@ print(f"[run.py] Train: {len(df_train):,} rows  |  Val: {len(df_val):,} rows")
 pipe = ShockDetectionPipeline(
     latent_dim        = 16,
     max_k             = 10,      # silhouette tests K=2..10, picks best
-    n_iter            = 1,       # ← increase to 50-100 for production
+    n_iter            = 60,       # ← increase to 50-100 for production
     lr                = 1e-3,
     time_col          = "Day",
     group_col         = "Actor1CountryCode",
